@@ -48,7 +48,7 @@ def rescale_actions(low, high, action):
     return scaled_action
 
 
-def print_statistics(print_stats, curr_frames, step_time, step_inference_time, total_time, epoch_num, max_epochs, frame, max_frames):
+def print_statistics(print_stats, curr_frames, step_time, step_inference_time, total_time, epoch_num, max_epochs, frame, max_frames, mean_rewards=None, ep_infos=None):
     if print_stats:
         step_time = max(step_time, 1e-9)
         fps_step = curr_frames / step_time
@@ -63,6 +63,19 @@ def print_statistics(print_stats, curr_frames, step_time, step_inference_time, t
             print(f'fps step: {fps_step:.0f} fps step and policy inference: {fps_step_inference:.0f} fps total: {fps_total:.0f} epoch: {epoch_num:.0f}/{max_epochs:.0f} frames: {frame:.0f}')
         else:
             print(f'fps step: {fps_step:.0f} fps step and policy inference: {fps_step_inference:.0f} fps total: {fps_total:.0f} epoch: {epoch_num:.0f}/{max_epochs:.0f} frames: {frame:.0f}/{max_frames:.0f}')
+
+        if mean_rewards is not None:
+            print(f'  episode reward: {mean_rewards[0]:.3f}')
+        if ep_infos:
+            sub_keys = ['task_rew', 'imi_rew', 'con_rew', 'bc_rew']
+            parts = []
+            for key in sub_keys:
+                if key in ep_infos[0]:
+                    vals = [ep[key] for ep in ep_infos if key in ep]
+                    vals = [v.mean().item() if isinstance(v, torch.Tensor) else float(v) for v in vals]
+                    parts.append(f'{key}: {np.mean(vals):.3f}')
+            if parts:
+                print(f'  sub-rewards: {" | ".join(parts)}')
 
 
 class A2CBase(BaseAlgorithm):
@@ -808,6 +821,8 @@ class A2CBase(BaseAlgorithm):
             if 'task_rew' not in infos['episode']:
                 print('Warning: task rewards not found in infos')
                 self.current_rewards += rewards
+            elif infos['episode'].get('no_object', False):
+                self.current_rewards += rewards
             else:
                 task_rewards = infos['episode']['task_rew'] # this is shape (B,)
                 self.current_rewards += task_rewards.unsqueeze(1)
@@ -1114,11 +1129,13 @@ class DiscreteA2CBase(A2CBase):
 
                 frame = self.frame // self.num_agents
 
-                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time, 
-                                epoch_num, self.max_epochs, frame, self.max_frames)
+                _mean_rewards = self.game_rewards.get_mean() if self.game_rewards.current_size > 0 else None
+                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time,
+                                epoch_num, self.max_epochs, frame, self.max_frames,
+                                mean_rewards=_mean_rewards, ep_infos=self.algo_observer.ep_infos)
 
                 self.write_stats(total_time, epoch_num, step_time, play_time, update_time,
-                                a_losses, c_losses, entropies, kls, last_lr, lr_mul, frame, 
+                                a_losses, c_losses, entropies, kls, last_lr, lr_mul, frame,
                                 scaled_time, scaled_play_time, curr_frames)
 
                 self.algo_observer.after_print_stats(frame, epoch_num, total_time)
@@ -1210,7 +1227,6 @@ class ContinuousA2CBase(A2CBase):
         # todo introduce device instead of cuda()
         self.actions_low = torch.from_numpy(action_space.low.copy()).float().to(self.ppo_device)
         self.actions_high = torch.from_numpy(action_space.high.copy()).float().to(self.ppo_device)
-
     def preprocess_actions(self, actions):
         if self.clip_actions:
             clamped_actions = torch.clamp(actions, -1.0, 1.0)
@@ -1427,8 +1443,10 @@ class ContinuousA2CBase(A2CBase):
                 curr_frames = self.curr_frames * self.world_size if self.multi_gpu else self.curr_frames
                 self.frame += curr_frames
 
-                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time, 
-                                epoch_num, self.max_epochs, frame, self.max_frames)
+                _mean_rewards = self.game_rewards.get_mean() if self.game_rewards.current_size > 0 else None
+                print_statistics(self.print_stats, curr_frames, step_time, scaled_play_time, scaled_time,
+                                epoch_num, self.max_epochs, frame, self.max_frames,
+                                mean_rewards=_mean_rewards, ep_infos=self.algo_observer.ep_infos)
 
                 stats_log = self.write_stats(total_time, epoch_num, step_time, play_time, update_time,
                                 a_losses, c_losses, entropies, kls, last_lr, lr_mul, frame,
@@ -1499,12 +1517,12 @@ class ContinuousA2CBase(A2CBase):
                     should_exit = True
                 
                 # add an early stop if reward is too low:
-                if epoch_num > 2500 and (not uenv.use_curriculum):
+                if epoch_num > 2500 and (not uenv.use_curriculum) :
                     if self.game_rewards.current_size == 0:
                         print('WARNING: No rewards recorded')
                         mean_rewards = -np.inf
                         should_exit = True
-                    elif mean_rewards[0] < 35:
+                    elif mean_rewards[0] < self.config.get('early_stop_reward_threshold', 35):
                         print('Reward too low, stopping')
                         should_exit = True
                         self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_ep_' + str(epoch_num) \
