@@ -1505,6 +1505,8 @@ class ContinuousA2CBase(A2CBase):
                                 self.save(os.path.join(self.nn_dir, checkpoint_name))
                                 should_exit = True
                 # print(f"wandb logging: {tolog}")
+                # Log current learning rate
+                tolog['learning_rate'] = self.optimizer.param_groups[0]['lr']
                 wandb.log(tolog)
                 if epoch_num >= self.max_epochs and self.max_epochs != -1:
                     if self.game_rewards.current_size == 0:
