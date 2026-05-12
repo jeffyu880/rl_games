@@ -1378,6 +1378,7 @@ class ContinuousA2CBase(A2CBase):
     def train(self):
         self.init_tensors()
         self.last_mean_rewards = -100500
+        self.best_rewards_epoch = 0
         start_time = time.perf_counter()
         total_time = 0
         rep_count = 0
@@ -1421,10 +1422,11 @@ class ContinuousA2CBase(A2CBase):
                         mean_rewards = self.game_rewards.get_mean() 
                         self.mean_rewards = mean_rewards[0]
                         if mean_rewards[0] > self.last_mean_rewards + 1.0 and epoch_num >= self.save_best_after:
-                            # NEW: only save after a margin    
+                            # NEW: only save after a margin
                             # print('saving next best rewards: ', mean_rewards)
                             self.last_mean_rewards = mean_rewards[0]
-                            self.save(os.path.join(self.nn_dir, self.config['name']))  
+                            self.best_rewards_epoch = epoch_num
+                            self.save(os.path.join(self.nn_dir, self.config['name']))
                     # self.algo_observer.clear_logs() # not saving the ep_infos before logging
                     continue
                  
@@ -1492,11 +1494,12 @@ class ContinuousA2CBase(A2CBase):
                             self.save(os.path.join(self.nn_dir, 'last_' + checkpoint_name))
 
                     if mean_rewards[0] > self.last_mean_rewards + 1.0 and epoch_num >= self.save_best_after:
-                        # NEW: only save after a margin   
+                        # NEW: only save after a margin
                         verbose = (epoch_num % 500 == 0)
                         if verbose:
                             print('saving next best rewards: ', mean_rewards)
                         self.last_mean_rewards = mean_rewards[0]
+                        self.best_rewards_epoch = epoch_num
                         self.save(os.path.join(self.nn_dir, self.config['name']), verbose=verbose)
 
                         if 'score_to_win' in self.config:
@@ -1536,6 +1539,14 @@ class ContinuousA2CBase(A2CBase):
                     self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_ep_' + str(epoch_num) \
                         + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')))
 
+                no_improve_patience = self.config.get('no_improve_patience', 500)
+                if (self.game_rewards.current_size > 0
+                        and no_improve_patience > 0
+                        and epoch_num - self.best_rewards_epoch > no_improve_patience):
+                    print(f'No reward improvement for {no_improve_patience} epochs (last improved at epoch {self.best_rewards_epoch}), stopping early.')
+                    should_exit = True
+                    self.save(os.path.join(self.nn_dir, 'last_' + self.config['name'] + '_ep_' + str(epoch_num) \
+                        + '_rew_' + str(mean_rewards).replace('[', '_').replace(']', '_')))
 
                 if self.frame >= self.max_frames and self.max_frames != -1:
                     if self.game_rewards.current_size == 0:
